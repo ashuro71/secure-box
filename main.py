@@ -41,7 +41,7 @@ class SecureBox:
         """
         
         if src.is_dir():
-            with zipfile.ZipFile(dest, mode='w', compression=zipfile.ZIP_DEFLATED) as zipf:
+            with zipfile.ZipFile(dest, mode='w', compression=zipfile.ZIP_LZMA) as zipf:
                 for item in src.rglob('*'):
                     
                     item_rel = item.relative_to(src)
