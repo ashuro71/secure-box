@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from argparse import ArgumentParser
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 from argon2.low_level import hash_secret_raw, Type
 from datetime import datetime, timezone
 from rich.logging import RichHandler
@@ -90,31 +91,32 @@ class SecureBox:
     def verify(self, args):
         src = Path(args.input).resolve()
         
+        logger.info(f'[*] Start: Integrity check')
+        logger.info(f'[*] Target: {src}')
+        
         dest = src.with_suffix("") 
         decrypted_src = self.decrypt(src, dest)
-        
-        logging.info(f'[*] Decrypted: {src} -> {dest}')
          
         if decrypted_src is not None:
             if not zipfile.is_zipfile(decrypted_src):
                 raise ValueError(f'[*] Not a .zip file: {decrypted_src}')
             
             with zipfile.ZipFile(decrypted_src, mode='r') as zf:
-                logger.info(f'[*] Start: Integrity check')
+                
                 for info in zf.infolist():
                     try:
                         with zf.open(info) as f:    
                             while f.read(1024 * 4):
                                 pass 
-                        logger.info(f'[*] OK: {info.filename}')
+                        logger.info(f'[+] OK: {info.filename}')
                         
                     except (zipfile.BadZipFile, lzma.LZMAError) as e:
                         logger.error(f'[x] Corrupt: {info.filename}')
-
-            logger.info(f'[*] Complete: Integrity Check')
             
             dest.unlink()
-            logger.info(f'[*] Deleted: {dest}')
+            logger.info(f'[+] Deleted: {dest}')
+            
+            logger.info(f'[*] Complete: Integrity Check')
         
     def generate_key(
         self, 
@@ -178,7 +180,14 @@ class SecureBox:
         Returns:
             None
         """
-                
+
+        logger.info(f'[*] Start: Lock')
+        
+        src = Path(args.input).resolve() 
+        dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')                
+        
+        logger.info(f'[+] Target: {src}')
+        
         salt = secrets.token_bytes(16)
         nonce = secrets.token_bytes(12)
         
@@ -187,13 +196,14 @@ class SecureBox:
         key = self.generate_key(salt, password)
         aesgcm = AESGCM(key)
         
-        src = Path(args.input).resolve() 
-        dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')
+        logger.info(f'[+] Generated: Nonce, Salt, Key')
         
         #Zip the directory first
         try:
             zip_fpath = self.zip(src, dest)
+            logger.info(f'[+] Zipped: {dest}')
         except (zipfile.error, ValueError) as e:
+            logger.error(f'[x] Error while zipping: {str(e)}')
             exit(1)
         
         #Generate the assoc_data and pack its length in a header
@@ -212,17 +222,23 @@ class SecureBox:
                 with open(cipher_f, mode='wb') as f:
                     data = nonce + salt + header + assoc_data + ciphertext 
                     f.write(data) 
+                    
+                logger.info(f'[+] Encrypted: {cipher_f}')
             
             except (ValueError, TypeError) as e:
+                logger.error(f'[x] Error while encrypting: {str(e)}')
                 return 
-            
             
             #Delete the .zip file
             zip_fpath.unlink()
+            logger.info(f'[+] Deleted: {zip_fpath}')
             
             #Delete the input directory after zipping if --delete flag is set
             if args.delete:
                 shutil.rmtree(src)
+                logger.info(f'[+] Deleted: {src}')
+                
+            logger.info(f'[*] Completed: Lock')
     
     def decrypt(
         self, 
@@ -249,15 +265,11 @@ class SecureBox:
                 
         aesgcm = AESGCM(key)
         
-        try:
-            plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data) 
-            with open(dest, mode='wb') as f:
-                f.write(plaintext)
-                
-            return dest
-        
-        except Exception as e:
-            print(f'[*] Exception while decrypting {src}: {str(e)}')
+        plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data) 
+        with open(dest, mode='wb') as f:
+            f.write(plaintext)
+            
+        return dest
         
         
     def unlock(
@@ -275,22 +287,41 @@ class SecureBox:
             None
         """
         
+        logger.info(f'[*] Start: Unlock')
+        
         src = Path(args.input).resolve()
         dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')
         
+        logger.info(f'[+] Target: {src}')
+        
+        #Decrypt the .zip.gcm file to .zip
         try:
             unencrypted_zip_file = self.decrypt(src, dest)
-            
+            logger.info(f'[+] Decrypted: {unencrypted_zip_file}')                
+                
+        except (InvalidTag, ValueError) as e:
+            logger.error(f'[x] Error while decrypting: {str(e)}')
+            return 
+           
+        #Unzip the .zip file from the previous step 
+        try:
             if unencrypted_zip_file is not None:
                 self.unzip(unencrypted_zip_file, unencrypted_zip_file.with_suffix(""))  
+                logger.info(f'[+] Unzipped: {unencrypted_zip_file.with_suffix("")}')
+                        
                 unencrypted_zip_file.unlink()
+                logger.info(f'[+] Deleted: {unencrypted_zip_file}')
                 
-        except (zipfile.error, ValueError) as e:
-            exit(1)
+        except zipfile.error as e:
+            logger.error(f'[x] Error while unzipping: {str(e)}')
+            return 
             
         if args.delete:
             src.unlink()        
-        
+            logger.info(f'[+] Deleted: {src}')
+            
+        logger.info(f'[*] Complete: Unlock')
+            
 if __name__ == '__main__':
     box = SecureBox()
     
