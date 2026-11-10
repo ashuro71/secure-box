@@ -29,12 +29,19 @@ logging.basicConfig(level=logging.DEBUG,
 
 logger = logging.getLogger('rich-secure-box')
 
-parser = ArgumentParser()
-subparsers = parser.add_subparsers(dest='command', required=True)
-
 class SecureBox:
-    def __init__(self):
-        pass 
+    def __init__(
+        self, 
+        mem_cost: int = 65536, 
+        time_cost: int = 3, 
+        parallelism: int = 4, 
+        key_length: int = 32
+    ):
+        
+        self.memory_cost = mem_cost
+        self.time_cost = time_cost
+        self.parallelism = parallelism
+        self.key_length = key_length 
     
     def zip(
         self, 
@@ -122,10 +129,6 @@ class SecureBox:
         self, 
         salt: bytes,
         secret: bytes,
-        memory_cost: int = 65536,
-        time_cost: int = 3,
-        parallelism: int = 4,
-        key_length = 32
     ) -> bytes:
         """
         Generates the encryption key using a password through a KDF function
@@ -140,10 +143,10 @@ class SecureBox:
         derived_key = hash_secret_raw(
             secret=secret,
             salt=salt,
-            time_cost=time_cost,
-            memory_cost=memory_cost,
-            parallelism=parallelism,
-            hash_len=key_length,
+            time_cost=self.time_cost,
+            memory_cost=self.memory_cost,
+            parallelism=self.parallelism,
+            hash_len=self.key_length,
             type=Type.ID
         )
         
@@ -166,9 +169,10 @@ class SecureBox:
         fname = fpath.stem 
         ctime = int(datetime.now(timezone.utc).timestamp())
         
-        associated_data = str(fname + '_' + '_' + str(ctime)).encode('UTF-8')
+        components = [fname, ctime, self.memory_cost, self.time_cost, self.parallelism, self.key_length]
+        assoc_data = '_'.join(str(i) for i in components)
         
-        return associated_data
+        return assoc_data.encode()
     
     def decrypt(
         self, 
@@ -204,6 +208,8 @@ class SecureBox:
             ciphertext = data[32+ad_len:]
             
         password = getpass.getpass('Password: ').encode()
+        
+        self.memory_cost, self.time_cost, self.parallelism, self.key_length = [int(i) for i in assoc_data.decode().split('_')[2:]]
         key = self.generate_key(salt, password)
                 
         aesgcm = AESGCM(key)
@@ -225,6 +231,8 @@ class SecureBox:
         
         aesgcm = AESGCM(key)
         logger.info(f'[+] Generated: Nonce, Salt, Key')
+        
+        #Generating the assoc data
         
         assoc_data = self.generate_associated_data(src)
         header = struct.pack('I', len(assoc_data))
@@ -327,9 +335,17 @@ class SecureBox:
             logger.info(f'[+] Deleted: {src}')
             
         logger.info(f'[*] Complete: Unlock')
-            
+        
+    @classmethod
+    def create_parser(cls):
+        pass 
+               
 if __name__ == '__main__':
+        
     box = SecureBox()
+    
+    parser = ArgumentParser()
+    subparsers = parser.add_subparsers(dest='command', required=True)
     
     lock_parser = subparsers.add_parser(name='lock')
     lock_parser.add_argument('--input', dest='input', type=Path, required=True)
@@ -351,6 +367,10 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     args.func(args)
+    
+    
+    
+    
     
          
         
