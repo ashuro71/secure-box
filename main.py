@@ -5,7 +5,6 @@ import secrets
 import getpass
 import zipfile
 import shutil
-import ctypes
 from pathlib import Path
 from argparse import ArgumentParser
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -291,16 +290,16 @@ if __name__ == '__main__':
     box = SecureBox()
     
     lock_parser = subparsers.add_parser(name='lock')
-    lock_parser.add_argument('--input', dest='input', type=Path)
-    lock_parser.add_argument('--output-dir', dest='output_dir', type=Path)
-    lock_parser.add_argument('--name', dest='name', type=Path)
+    lock_parser.add_argument('--input', dest='input', type=Path, required=True)
+    lock_parser.add_argument('--output-dir', dest='output_dir', type=Path, required=True)
+    lock_parser.add_argument('--name', dest='name', type=Path, required=True)
     lock_parser.add_argument('-d', '--delete', dest='delete', action='store_true')
     lock_parser.set_defaults(func=box.lock)
     
     unlock_parser = subparsers.add_parser(name='unlock')
-    unlock_parser.add_argument('--input', dest='input', type=Path)
-    unlock_parser.add_argument('--output-dir', dest='output_dir', type=Path)
-    unlock_parser.add_argument('--name', dest='name', type=Path)
+    unlock_parser.add_argument('--input', dest='input', type=Path, required=True)
+    unlock_parser.add_argument('--output-dir', dest='output_dir', type=Path, required=True)
+    unlock_parser.add_argument('--name', dest='name', type=Path, required=True)
     unlock_parser.set_defaults(func=box.unlock)
     
     args = parser.parse_args()
