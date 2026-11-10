@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.DEBUG,
         console=console, 
         rich_tracebacks=True,          
         tracebacks_show_locals=True    
-    )])
+)])
 
 logger = logging.getLogger('rich-secure-box')
 
@@ -95,13 +95,13 @@ class SecureBox:
         logger.info(f'[*] Target: {src}')
         
         dest = src.with_suffix("") 
-        decrypted_src = self.decrypt(src, dest)
+        self.decrypt(src, dest)
          
-        if decrypted_src is not None:
-            if not zipfile.is_zipfile(decrypted_src):
-                raise ValueError(f'[*] Not a .zip file: {decrypted_src}')
+        if dest.exists():
+            if not zipfile.is_zipfile(dest):
+                raise ValueError(f'[*] Not a .zip file: {dest}')
             
-            with zipfile.ZipFile(decrypted_src, mode='r') as zf:
+            with zipfile.ZipFile(dest, mode='r') as zf:
                 
                 for info in zf.infolist():
                     try:
@@ -149,7 +149,10 @@ class SecureBox:
         
         return derived_key
     
-    def generate_associated_data(self, fpath: Path):
+    def generate_associated_data(
+        self, 
+        fpath: Path
+    ) -> bytes:
         """
         Generate the associate data
 
@@ -171,8 +174,21 @@ class SecureBox:
         self, 
         src: Path, 
         dest: Path
-    ) -> Path | None:
+    ) -> None:
+        """
+        Decrypts a .gcm file.
+
+        Args:
+            src (Path): The path of the source .gcm file that has to be decrypted
+            dest (Path): The path of the output .zip file
+
+        Returns:
+            None: Doesn't return anything
+        """
             
+        if src.suffix != '.gcm':
+            raise ValueError(f'[x] src is not a .gcm file')
+        
         src = Path(src).resolve()
         dest = Path(dest).resolve()
         
@@ -196,7 +212,30 @@ class SecureBox:
         with open(dest, mode='wb') as f:
             f.write(plaintext)
             
-        return dest
+    def encrypt(self, 
+        src: Path,
+        dest: Path,
+        password: bytes
+    ) -> Path | None:
+        
+        salt = secrets.token_bytes(16)
+        nonce = secrets.token_bytes(12)
+        
+        key = self.generate_key(salt, password)
+        
+        aesgcm = AESGCM(key)
+        logger.info(f'[+] Generated: Nonce, Salt, Key')
+        
+        assoc_data = self.generate_associated_data(src)
+        header = struct.pack('I', len(assoc_data))
+        
+        with open(src, mode='rb') as f:
+            cipher = aesgcm.encrypt(nonce, f.read(), assoc_data)
+            
+        with open(dest, mode='wb') as f:
+            data = nonce + salt + header + assoc_data + cipher
+            f.write(data)
+        
     
     def lock(
         self, 
@@ -219,57 +258,32 @@ class SecureBox:
         
         logger.info(f'[+] Target: {src}')
         
-        salt = secrets.token_bytes(16)
-        nonce = secrets.token_bytes(12)
-        
         password = getpass.getpass('Password: ').encode()
-        
-        key = self.generate_key(salt, password)
-        aesgcm = AESGCM(key)
-        
-        logger.info(f'[+] Generated: Nonce, Salt, Key')
         
         #Zip the directory first
         try:
-            zip_fpath = self.zip(src, dest)
+            self.zip(src, dest)
             logger.info(f'[+] Zipped: {dest}')
-        except (zipfile.error, ValueError) as e:
-            logger.error(f'[x] Error while zipping: {str(e)}')
-            exit(1)
-        
-        #Generate the assoc_data and pack its length in a header
-        assoc_data = self.generate_associated_data(src)
-        header = struct.pack('I', len(assoc_data))
-        
-        if zip_fpath is not None:
-            cipher_f = zip_fpath.with_name(f'{zip_fpath.name}.gcm')
-        
-            #Generate the cipertext based on the .zip file
-            try:
-                with open(zip_fpath, mode='rb') as f:
-                    ciphertext = aesgcm.encrypt(nonce, f.read(), assoc_data)
-                    
-                #Write the ciphertext to a .gcm file. Output: dest.zip.gcm
-                with open(cipher_f, mode='wb') as f:
-                    data = nonce + salt + header + assoc_data + ciphertext 
-                    f.write(data) 
-                    
-                logger.info(f'[+] Encrypted: {cipher_f}')
             
-            except (ValueError, TypeError) as e:
-                logger.error(f'[x] Error while encrypting: {str(e)}')
-                return 
-            
-            #Delete the .zip file
-            zip_fpath.unlink()
-            logger.info(f'[+] Deleted: {zip_fpath}')
-            
-            #Delete the input directory after zipping if --delete flag is set
-            if args.delete:
-                shutil.rmtree(src)
-                logger.info(f'[+] Deleted: {src}')
+            if dest.exists():
+                gcm = dest.with_name(f'{dest.name}.gcm')
                 
-            logger.info(f'[*] Completed: Lock')
+                self.encrypt(dest, gcm, password)     
+                logger.info(f'[+] Encrypted: {gcm}')
+                
+                dest.unlink()
+                logger.info(f'[+] Deleted: {dest}')
+            
+        except (zipfile.error, TypeError, ValueError) as e:
+            logger.error(f'[x] Zipping/encrypting: {str(e)}')
+            return 
+            
+        #Delete the input directory after zipping if --delete flag is set
+        if args.delete:
+            shutil.rmtree(src)
+            logger.info(f'[+] Deleted: {src}')
+            
+        logger.info(f'[*] Completed: Lock')
             
     def unlock(
         self, 
@@ -295,24 +309,17 @@ class SecureBox:
         
         #Decrypt the .zip.gcm file to .zip
         try:
-            unencrypted_zip_file = self.decrypt(src, dest)
-            logger.info(f'[+] Decrypted: {unencrypted_zip_file}')                
+            self.decrypt(src, dest)
+            logger.info(f'[+] Decrypted: {dest}')
+            
+            self.unzip(dest, dest.with_suffix(""))  
+            logger.info(f'[+] Unzipped: {dest.with_suffix("")}')   
+            
+            dest.unlink()
+            logger.info(f'[+] Deleted: {dest}')             
                 
-        except (InvalidTag, ValueError) as e:
+        except (zipfile.error, InvalidTag, ValueError) as e:
             logger.error(f'[x] Error while decrypting: {str(e)}')
-            return 
-           
-        #Unzip the .zip file from the previous step 
-        try:
-            if unencrypted_zip_file is not None:
-                self.unzip(unencrypted_zip_file, unencrypted_zip_file.with_suffix(""))  
-                logger.info(f'[+] Unzipped: {unencrypted_zip_file.with_suffix("")}')
-                        
-                unencrypted_zip_file.unlink()
-                logger.info(f'[+] Deleted: {unencrypted_zip_file}')
-                
-        except zipfile.error as e:
-            logger.error(f'[x] Error while unzipping: {str(e)}')
             return 
             
         if args.delete:
