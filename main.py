@@ -5,9 +5,9 @@ import secrets
 import getpass
 import zipfile
 import shutil
+import ctypes
 from pathlib import Path
 from argparse import ArgumentParser
-from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from argon2.low_level import hash_secret_raw, Type
 from datetime import datetime, timezone
@@ -67,17 +67,16 @@ class SecureBox:
             ValueError: Raised if the src is not a valid .zip file.
         """
         
-        if src.is_file():
-            
-            with zipfile.ZipFile(src, mode='r') as zipf:
-                zipf.extractall(dest)
-
-        else:
+        if src.suffix != '.zip':
             raise ValueError(f'The input must be a .zip file')
+            
+        with zipfile.ZipFile(src, mode='r') as zipf:
+            zipf.extractall(dest)            
         
     def generate_key(
         self, 
-        salt: bytes
+        salt: bytes,
+        secret: bytes
     ) -> bytes:
         """
         Generates the encryption key using a password through a KDF function
@@ -88,8 +87,6 @@ class SecureBox:
         Returns:
             bytes: The generated encryption key
         """
-        
-        password = getpass.getpass('Password: ')
             
         memory_cost = 65536
         time_cost = 3
@@ -97,7 +94,7 @@ class SecureBox:
         key_length = 32
         
         derived_key = hash_secret_raw(
-            secret=password.encode(),
+            secret=secret,
             salt=salt,
             time_cost=time_cost,
             memory_cost=memory_cost,
@@ -109,6 +106,16 @@ class SecureBox:
         return derived_key
     
     def generate_associated_data(self, fpath: Path):
+        """
+        Generate the associate data
+
+        Args:
+            fpath (Path): The path of input directory
+
+        Returns:
+            bytes : The assoc data generated through the name + datetime 
+        """
+        
         fname = fpath.stem 
         ctime = int(datetime.now(timezone.utc).timestamp())
         
@@ -136,7 +143,9 @@ class SecureBox:
         salt = secrets.token_bytes(16)
         nonce = secrets.token_bytes(12)
         
-        key = self.generate_key(salt)
+        password = getpass.getpass('Password: ').encode()
+        
+        key = self.generate_key(salt, password)
         aesgcm = AESGCM(key)
         
         src = Path(args.input).resolve() 
@@ -227,8 +236,8 @@ class SecureBox:
             assoc_data = data[32:32+ad_len]
             ciphertext = data[32+ad_len:]
             
-        #Generate the key
-        key = self.generate_key(salt)
+        password = getpass.getpass('Password: ').encode()
+        key = self.generate_key(salt, password)
         
         aesgcm = AESGCM(key)
         
@@ -276,6 +285,7 @@ class SecureBox:
             delete_node.add(f'source: [red]{uncrypted_zip_file}[/red]')
             uncrypted_zip_file.unlink()
             delete_node.add(f'source: [bold green]success[/bold green]')
+    
         
 if __name__ == '__main__':
     box = SecureBox()
