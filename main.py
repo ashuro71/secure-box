@@ -167,6 +167,37 @@ class SecureBox:
         
         return associated_data
     
+    def decrypt(
+        self, 
+        src: Path, 
+        dest: Path
+    ) -> Path | None:
+            
+        src = Path(src).resolve()
+        dest = Path(dest).resolve()
+        
+        #Extract the nonce, ciphertext and the salt from the .zip.gcm file.
+        with open(src, mode='rb') as f:
+            data = f.read()
+            
+            nonce = data[:12]
+            salt = data[12:28]
+            header = data[28:32]
+            ad_len = struct.unpack('I', header)[0]
+            assoc_data = data[32:32+ad_len]
+            ciphertext = data[32+ad_len:]
+            
+        password = getpass.getpass('Password: ').encode()
+        key = self.generate_key(salt, password)
+                
+        aesgcm = AESGCM(key)
+        
+        plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data) 
+        with open(dest, mode='wb') as f:
+            f.write(plaintext)
+            
+        return dest
+    
     def lock(
         self, 
         args
@@ -239,39 +270,7 @@ class SecureBox:
                 logger.info(f'[+] Deleted: {src}')
                 
             logger.info(f'[*] Completed: Lock')
-    
-    def decrypt(
-        self, 
-        src: Path, 
-        dest: Path
-    ) -> Path | None:
-        
-        src = Path(src).resolve()
-        dest = Path(dest).resolve()
-        
-        #Extract the nonce, ciphertext and the salt from the .zip.gcm file.
-        with open(src, mode='rb') as f:
-            data = f.read()
             
-            nonce = data[:12]
-            salt = data[12:28]
-            header = data[28:32]
-            ad_len = struct.unpack('I', header)[0]
-            assoc_data = data[32:32+ad_len]
-            ciphertext = data[32+ad_len:]
-            
-        password = getpass.getpass('Password: ').encode()
-        key = self.generate_key(salt, password)
-                
-        aesgcm = AESGCM(key)
-        
-        plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data) 
-        with open(dest, mode='wb') as f:
-            f.write(plaintext)
-            
-        return dest
-        
-        
     def unlock(
         self, 
         args
