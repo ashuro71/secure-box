@@ -4,21 +4,36 @@ import struct
 import secrets
 import getpass
 import zipfile
+import lzma 
 import shutil
+import logging 
 from pathlib import Path
 from argparse import ArgumentParser
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from argon2.low_level import hash_secret_raw, Type
 from datetime import datetime, timezone
-from rich.tree import Tree 
-from rich.live import Live
+from rich.logging import RichHandler
+from rich.console import Console
+
+console = Console()
+
+logging.basicConfig(level=logging.DEBUG,               
+    format="%(message)s",              
+    datefmt="[%X.%f]",                    
+    handlers=[RichHandler(
+        console=console, 
+        rich_tracebacks=True,          
+        tracebacks_show_locals=True    
+    )])
+
+logger = logging.getLogger('rich-secure-box')
 
 parser = ArgumentParser()
 subparsers = parser.add_subparsers(dest='command', required=True)
 
 class SecureBox:
     def __init__(self):
-        pass
+        pass 
     
     def zip(
         self, 
@@ -66,16 +81,49 @@ class SecureBox:
             ValueError: Raised if the src is not a valid .zip file.
         """
         
-        if src.suffix != '.zip':
+        if not zipfile.is_zipfile(src):
             raise ValueError(f'The input must be a .zip file')
             
         with zipfile.ZipFile(src, mode='r') as zipf:
-            zipf.extractall(dest)            
+            zipf.extractall(dest)  
+            
+    def verify(self, args):
+        src = Path(args.input).resolve()
+        
+        dest = src.with_suffix("") 
+        decrypted_src = self.decrypt(src, dest)
+        
+        logging.info(f'[*] Decrypted: {src} -> {dest}')
+         
+        if decrypted_src is not None:
+            if not zipfile.is_zipfile(decrypted_src):
+                raise ValueError(f'[*] Not a .zip file: {decrypted_src}')
+            
+            with zipfile.ZipFile(decrypted_src, mode='r') as zf:
+                logger.info(f'[*] Start: Integrity check')
+                for info in zf.infolist():
+                    try:
+                        with zf.open(info) as f:    
+                            while f.read(1024 * 4):
+                                pass 
+                        logger.info(f'[*] OK: {info.filename}')
+                        
+                    except (zipfile.BadZipFile, lzma.LZMAError) as e:
+                        logger.error(f'[x] Corrupt: {info.filename}')
+
+            logger.info(f'[*] Complete: Integrity Check')
+            
+            dest.unlink()
+            logger.info(f'[*] Deleted: {dest}')
         
     def generate_key(
         self, 
         salt: bytes,
-        secret: bytes
+        secret: bytes,
+        memory_cost: int = 65536,
+        time_cost: int = 3,
+        parallelism: int = 4,
+        key_length = 32
     ) -> bytes:
         """
         Generates the encryption key using a password through a KDF function
@@ -87,11 +135,6 @@ class SecureBox:
             bytes: The generated encryption key
         """
             
-        memory_cost = 65536
-        time_cost = 3
-        parallelism = 4
-        key_length = 32
-        
         derived_key = hash_secret_raw(
             secret=secret,
             salt=salt,
@@ -135,10 +178,7 @@ class SecureBox:
         Returns:
             None
         """
-
-        #Logging            
-        root = Tree(f"[bold cyan]Directory lock initialized[/bold cyan] [dim](ID: 1)[/dim]")
-        
+                
         salt = secrets.token_bytes(16)
         nonce = secrets.token_bytes(12)
         
@@ -150,61 +190,76 @@ class SecureBox:
         src = Path(args.input).resolve() 
         dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')
         
-        with Live(root, refresh_per_second=10) as live:
-            zip_node = root.add("🗜️ [bold yellow]Zipping...[/bold yellow]")
-            #Zip the directory first
-            zip_node.add(f"source: [green]{src}[/green]")
-            zip_node.add(f"output: [green]{dest}[/green]")
+        #Zip the directory first
+        try:
+            zip_fpath = self.zip(src, dest)
+        except (zipfile.error, ValueError) as e:
+            exit(1)
+        
+        #Generate the assoc_data and pack its length in a header
+        assoc_data = self.generate_associated_data(src)
+        header = struct.pack('I', len(assoc_data))
+        
+        if zip_fpath is not None:
+            cipher_f = zip_fpath.with_name(f'{zip_fpath.name}.gcm')
+        
+            #Generate the cipertext based on the .zip file
             try:
-                zip_fpath = self.zip(src, dest)
-                zip_node.add("status: [bold green]success[/bold green]")
-            except (zipfile.error, ValueError) as e:
-                zip_node.add(f"status: [bold red]failed[/bold red]")
-                zip_node.add(f"reason: [bold red]{str(e)}[/bold red]")
-                exit(1)
+                with open(zip_fpath, mode='rb') as f:
+                    ciphertext = aesgcm.encrypt(nonce, f.read(), assoc_data)
+                    
+                #Write the ciphertext to a .gcm file. Output: dest.zip.gcm
+                with open(cipher_f, mode='wb') as f:
+                    data = nonce + salt + header + assoc_data + ciphertext 
+                    f.write(data) 
             
-            #Generate the assoc_data and pack its length in a header
-            assoc_data = self.generate_associated_data(src)
-            header = struct.pack('I', len(assoc_data))
+            except (ValueError, TypeError) as e:
+                return 
             
-            if zip_fpath is not None:
-                cipher_f = zip_fpath.with_name(f'{zip_fpath.name}.gcm')
+            
+            #Delete the .zip file
+            zip_fpath.unlink()
+            
+            #Delete the input directory after zipping if --delete flag is set
+            if args.delete:
+                shutil.rmtree(src)
+    
+    def decrypt(
+        self, 
+        src: Path, 
+        dest: Path
+    ) -> Path | None:
+        
+        src = Path(src).resolve()
+        dest = Path(dest).resolve()
+        
+        #Extract the nonce, ciphertext and the salt from the .zip.gcm file.
+        with open(src, mode='rb') as f:
+            data = f.read()
+            
+            nonce = data[:12]
+            salt = data[12:28]
+            header = data[28:32]
+            ad_len = struct.unpack('I', header)[0]
+            assoc_data = data[32:32+ad_len]
+            ciphertext = data[32+ad_len:]
+            
+        password = getpass.getpass('Password: ').encode()
+        key = self.generate_key(salt, password)
                 
-                encrypt_node = root.add("🔒 [bold blue]Encryption...[/bold blue]")
+        aesgcm = AESGCM(key)
+        
+        try:
+            plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data) 
+            with open(dest, mode='wb') as f:
+                f.write(plaintext)
                 
-                encrypt_node.add(f"source: [green]{zip_fpath}[/green]")
-                encrypt_node.add(f"output: [green]{cipher_f}[/green]")
-                
-                #Generate the cipertext based on the .zip file
-                try:
-                    with open(zip_fpath, mode='rb') as f:
-                        ciphertext = aesgcm.encrypt(nonce, f.read(), assoc_data)
-                        
-                    #Write the ciphertext to a .gcm file. Output: dest.zip.gcm
-                    with open(cipher_f, mode='wb') as f:
-                        data = nonce + salt + header + assoc_data + ciphertext 
-                        f.write(data) 
-                
-                    encrypt_node.add(f"status: [bold green]success[/bold green]")
-                except (ValueError, TypeError) as e:
-                    encrypt_node.add(f'status: [bold red]failed[/bold red]')
-                    encrypt_node.add(f'reason: [bold red]{str(e)}[/bold red]')
-                    return 
-                
-                
-                #Delete the .zip file
-                delete_node = root.add("💥 [bold red]Deleting...[/bold red]")
-                
-                delete_node.add(f"source: [red]{zip_fpath}[/red]")
-                zip_fpath.unlink()
-                delete_node.add("status: [bold green]success[/bold green]")
-                
-                #Delete the input directory after zipping if --delete flag is set
-                if args.delete:
-                    delete_node.add(f"source: [red]{src}[/red]")
-                    shutil.rmtree(src)
-                    delete_node.add(f"status: [bold green]success[/bold green]")
-                
+            return dest
+        
+        except Exception as e:
+            print(f'[*] Exception while decrypting {src}: {str(e)}')
+        
+        
     def unlock(
         self, 
         args
@@ -220,72 +275,21 @@ class SecureBox:
             None
         """
         
-        root = Tree(f"[bold cyan]Directory unlock initialized[/bold cyan] [dim](ID: 1)[/dim]")
+        src = Path(args.input).resolve()
+        dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')
         
-        gcm = Path(args.input).resolve()
-        
-        #Extract the nonce, ciphertext and the salt from the .zip.gcm file.
-        with open(gcm, mode='rb') as f:
-            data = f.read()
+        try:
+            unencrypted_zip_file = self.decrypt(src, dest)
             
-            nonce = data[:12]
-            salt = data[12:28]
-            header = data[28:32]
-            ad_len = struct.unpack('I', header)[0]
-            assoc_data = data[32:32+ad_len]
-            ciphertext = data[32+ad_len:]
-            
-        password = getpass.getpass('Password: ').encode()
-        key = self.generate_key(salt, password)
-        
-        aesgcm = AESGCM(key)
-        
-        uncrypted_zip_file = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')
-        
-        with Live(root, refresh_per_second=4) as live:
-            #Decrypt the ciphertext
-            decrypt_node = root.add("🔓 [bold blue]Decrypting...[/bold blue]")
-            
-            decrypt_node.add(f"source: [green]{gcm}[/green]")
-            decrypt_node.add(f'output: [green]{uncrypted_zip_file}[/green]')
-            try:
-                plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data)   
+            if unencrypted_zip_file is not None:
+                self.unzip(unencrypted_zip_file, unencrypted_zip_file.with_suffix(""))  
+                unencrypted_zip_file.unlink()
                 
-                #Write the decrypted data to a .zip file
-                with open(uncrypted_zip_file, mode='wb') as f:
-                    f.write(plaintext)
-                    
-                decrypt_node.add('status: [bold green]success[/bold green]')
-            except Exception as e:
-                decrypt_node.add('status: [bold red]failed[/bold red]')
-                decrypt_node.add(f'reason: [bold red]{str(e)}[/bold red]')
-                return 
+        except (zipfile.error, ValueError) as e:
+            exit(1)
             
-            #Unzip the file
-            unzip_node = root.add("🗜️ [bold yellow]Unzipping...[/bold yellow]")
-            try:
-                unzip_node.add(f'source: [green]{uncrypted_zip_file}[/green]')
-                unzip_node.add(f'output: [green]{uncrypted_zip_file.with_suffix("")}[/green]')
-                self.unzip(uncrypted_zip_file, uncrypted_zip_file.with_suffix(""))  
-                unzip_node.add(f'status: [bold green]success[/bold green]')
-            except (zipfile.error, ValueError) as e:
-                unzip_node.add(f'status: [bold red]failed[/bold red]')
-                unzip_node.add(f'reason: [bold red]{str(e)}[/bold red]')
-                exit(1)
-                
-            #Delete the .zip.gcm file
-            delete_node = root.add("💥 [bold red]Deleting...[/bold red]")
-            
-            if args.delete:
-                delete_node.add(f'source: [red]{gcm}[/red]')
-                gcm.unlink()        
-                delete_node.add(f'status: [bold green]success[/bold green]')
-            
-            #Delete the .zip file
-            delete_node.add(f'source: [red]{uncrypted_zip_file}[/red]')
-            uncrypted_zip_file.unlink()
-            delete_node.add(f'source: [bold green]success[/bold green]')
-    
+        if args.delete:
+            src.unlink()        
         
 if __name__ == '__main__':
     box = SecureBox()
@@ -303,6 +307,10 @@ if __name__ == '__main__':
     unlock_parser.add_argument('--name', dest='name', type=Path, required=True)
     unlock_parser.add_argument('-d', '--delete', dest='delete', action='store_true')
     unlock_parser.set_defaults(func=box.unlock)
+    
+    verify_parser = subparsers.add_parser(name='verify')
+    verify_parser.add_argument('--input', dest='input', type=Path, required=True)
+    verify_parser.set_defaults(func=box.verify)
     
     args = parser.parse_args()
     args.func(args)
