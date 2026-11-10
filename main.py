@@ -276,9 +276,10 @@ class SecureBox:
             #Delete the .zip.gcm file
             delete_node = root.add("💥 [bold red]Deleting...[/bold red]")
             
-            delete_node.add(f'source: [red]{gcm}[/red]')
-            gcm.unlink()        
-            delete_node.add(f'status: [bold green]success[/bold green]')
+            if args.delete:
+                delete_node.add(f'source: [red]{gcm}[/red]')
+                gcm.unlink()        
+                delete_node.add(f'status: [bold green]success[/bold green]')
             
             #Delete the .zip file
             delete_node.add(f'source: [red]{uncrypted_zip_file}[/red]')
@@ -300,6 +301,7 @@ if __name__ == '__main__':
     unlock_parser.add_argument('--input', dest='input', type=Path, required=True)
     unlock_parser.add_argument('--output-dir', dest='output_dir', type=Path, required=True)
     unlock_parser.add_argument('--name', dest='name', type=Path, required=True)
+    unlock_parser.add_argument('-d', '--delete', dest='delete', action='store_true')
     unlock_parser.set_defaults(func=box.unlock)
     
     args = parser.parse_args()
