@@ -42,6 +42,8 @@ class SecureBox:
         self.time_cost = time_cost
         self.parallelism = parallelism
         self.key_length = key_length 
+        
+        self.parser = self.create_parser()
     
     def zip(
         self, 
@@ -336,37 +338,38 @@ class SecureBox:
             
         logger.info(f'[*] Complete: Unlock')
         
-    @classmethod
-    def create_parser(cls):
-        pass 
+    def create_parser(self):
+        
+        parser = ArgumentParser()
+        subparsers = parser.add_subparsers(dest='command', required=True)
+        
+        lock_parser = subparsers.add_parser(name='lock')
+        lock_parser.add_argument('--input', dest='input', type=Path, required=True)
+        lock_parser.add_argument('--output-dir', dest='output_dir', type=Path, required=True)
+        lock_parser.add_argument('--name', dest='name', type=Path, required=True)
+        lock_parser.add_argument('-d', '--delete', dest='delete', action='store_true')
+        lock_parser.set_defaults(func=self.lock)
+        
+        unlock_parser = subparsers.add_parser(name='unlock')
+        unlock_parser.add_argument('--input', dest='input', type=Path, required=True)
+        unlock_parser.add_argument('--output-dir', dest='output_dir', type=Path, required=True)
+        unlock_parser.add_argument('--name', dest='name', type=Path, required=True)
+        unlock_parser.add_argument('-d', '--delete', dest='delete', action='store_true')
+        unlock_parser.set_defaults(func=self.unlock)
+        
+        verify_parser = subparsers.add_parser(name='verify')
+        verify_parser.add_argument('--input', dest='input', type=Path, required=True)
+        verify_parser.set_defaults(func=self.verify) 
+    
+        return parser
+    
+    def execute(self):
+        args = self.parser.parse_args()
+        args.func(args)
                
 if __name__ == '__main__':
-        
-    box = SecureBox()
+    _ = SecureBox().execute()
     
-    parser = ArgumentParser()
-    subparsers = parser.add_subparsers(dest='command', required=True)
-    
-    lock_parser = subparsers.add_parser(name='lock')
-    lock_parser.add_argument('--input', dest='input', type=Path, required=True)
-    lock_parser.add_argument('--output-dir', dest='output_dir', type=Path, required=True)
-    lock_parser.add_argument('--name', dest='name', type=Path, required=True)
-    lock_parser.add_argument('-d', '--delete', dest='delete', action='store_true')
-    lock_parser.set_defaults(func=box.lock)
-    
-    unlock_parser = subparsers.add_parser(name='unlock')
-    unlock_parser.add_argument('--input', dest='input', type=Path, required=True)
-    unlock_parser.add_argument('--output-dir', dest='output_dir', type=Path, required=True)
-    unlock_parser.add_argument('--name', dest='name', type=Path, required=True)
-    unlock_parser.add_argument('-d', '--delete', dest='delete', action='store_true')
-    unlock_parser.set_defaults(func=box.unlock)
-    
-    verify_parser = subparsers.add_parser(name='verify')
-    verify_parser.add_argument('--input', dest='input', type=Path, required=True)
-    verify_parser.set_defaults(func=box.verify)
-    
-    args = parser.parse_args()
-    args.func(args)
     
     
     
