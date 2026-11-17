@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from argparse import ArgumentParser
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidTag, InvalidKey
 from argon2.low_level import hash_secret_raw, Type
 from datetime import datetime, timezone
 from rich.logging import RichHandler
@@ -18,7 +18,8 @@ from rich.console import Console
 
 console = Console()
 
-logging.basicConfig(level=logging.DEBUG,               
+logging.basicConfig(
+    level=logging.DEBUG,               
     format="%(message)s",              
     datefmt="[%X.%f]",                    
     handlers=[RichHandler(
@@ -29,15 +30,18 @@ logging.basicConfig(level=logging.DEBUG,
 
 logger = logging.getLogger('rich-secure-box')
 
+#Zip a directory, then wrap it in an AES-256-GCM container (.zip.gcm), and the reverse.
 class SecureBox:
     def __init__(
         self, 
         mem_cost: int = 65536, 
-        time_cost: int = 3, 
+        time_cost: int = 4, 
         parallelism: int = 4, 
         key_length: int = 32
     ):
         
+        #Argon2id costs used when encrypting. decrypt() overwrites these with the
+        #values recorded in whichever container it is opening.
         self.memory_cost = mem_cost
         self.time_cost = time_cost
         self.parallelism = parallelism
@@ -66,6 +70,8 @@ class SecureBox:
         
         if src.is_dir():
             with zipfile.ZipFile(dest, mode='w', compression=zipfile.ZIP_LZMA) as zipf:
+                #Relative paths, so the archive holds src's contents at top level
+                #rather than a containing folder.
                 for item in src.rglob('*'):
                     
                     item_rel = item.relative_to(src)
@@ -104,7 +110,13 @@ class SecureBox:
         logger.info(f'[*] Target: {src}')
         
         dest = src.with_suffix("") 
-        self.decrypt(src, dest)
+        
+        try:
+            self.decrypt(src, dest)
+        except InvalidTag as e:
+            logger.error(f'[x] Error while verifying/decrypting: {str(e)}')
+            dest.unlink(missing_ok=True)
+            return
          
         if dest.exists():
             if not zipfile.is_zipfile(dest):
@@ -112,6 +124,7 @@ class SecureBox:
             
             with zipfile.ZipFile(dest, mode='r') as zf:
                 
+                #Reading each member to EOF forces zipfile's per-entry CRC-32 check.
                 for info in zf.infolist():
                     try:
                         with zf.open(info) as f:    
@@ -121,6 +134,7 @@ class SecureBox:
                         
                     except (zipfile.BadZipFile, lzma.LZMAError) as e:
                         logger.error(f'[x] Corrupt: {info.filename}')
+                        return
             
             dest.unlink()
             logger.info(f'[+] Deleted: {dest}')
@@ -142,6 +156,7 @@ class SecureBox:
             bytes: The generated encryption key
         """
             
+        #Costs are taken from instance state, which decrypt() may have replaced.
         derived_key = hash_secret_raw(
             secret=secret,
             salt=salt,
@@ -198,20 +213,22 @@ class SecureBox:
         src = Path(src).resolve()
         dest = Path(dest).resolve()
         
-        #Extract the nonce, ciphertext and the salt from the .zip.gcm file.
+        #Fixed-offset layout: nonce(12) | salt(16) | ad_len(4) | ad(ad_len) | ciphertext+tag
         with open(src, mode='rb') as f:
             data = f.read()
             
             nonce = data[:12]
             salt = data[12:28]
             header = data[28:32]
-            ad_len = struct.unpack('I', header)[0]
+            ad_len = struct.unpack('<I', header)[0]
             assoc_data = data[32:32+ad_len]
             ciphertext = data[32+ad_len:]
             
         password = getpass.getpass('Password: ').encode()
         
-        self.memory_cost, self.time_cost, self.parallelism, self.key_length = [int(i) for i in assoc_data.decode().split('_')[2:]]
+        #Re-derive using the costs recorded in the container, so archives written under
+        #other defaults stay readable.
+        self.memory_cost, self.time_cost, self.parallelism, self.key_length = [int(i) for i in assoc_data.decode().split('_')[-4:]]
         key = self.generate_key(salt, password)
                 
         aesgcm = AESGCM(key)
@@ -219,6 +236,7 @@ class SecureBox:
         plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data) 
         with open(dest, mode='wb') as f:
             f.write(plaintext)
+            
             
     def encrypt(self, 
         src: Path,
@@ -235,9 +253,8 @@ class SecureBox:
         logger.info(f'[+] Generated: Nonce, Salt, Key')
         
         #Generating the assoc data
-        
         assoc_data = self.generate_associated_data(src)
-        header = struct.pack('I', len(assoc_data))
+        header = struct.pack('<I', len(assoc_data))
         
         with open(src, mode='rb') as f:
             cipher = aesgcm.encrypt(nonce, f.read(), assoc_data)
@@ -281,6 +298,7 @@ class SecureBox:
                 self.encrypt(dest, gcm, password)     
                 logger.info(f'[+] Encrypted: {gcm}')
                 
+                #Drop the transient plaintext archive
                 dest.unlink()
                 logger.info(f'[+] Deleted: {dest}')
             
@@ -322,22 +340,26 @@ class SecureBox:
             self.decrypt(src, dest)
             logger.info(f'[+] Decrypted: {dest}')
             
+            #Extract, then drop the transient plaintext archive.
             self.unzip(dest, dest.with_suffix(""))  
             logger.info(f'[+] Unzipped: {dest.with_suffix("")}')   
             
             dest.unlink()
             logger.info(f'[+] Deleted: {dest}')             
                 
-        except (zipfile.error, InvalidTag, ValueError) as e:
+        except (zipfile.error, InvalidTag, ValueError, InvalidKey) as e:
             logger.error(f'[x] Error while decrypting: {str(e)}')
             return 
             
+        #--delete removes this operation's own input: the container here, the source
+        #directory in lock().
         if args.delete:
             src.unlink()        
             logger.info(f'[+] Deleted: {src}')
             
         logger.info(f'[*] Complete: Unlock')
         
+    #Subcommands: lock, unlock, verify.
     def create_parser(self):
         
         parser = ArgumentParser()
