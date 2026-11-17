@@ -4,9 +4,9 @@ import struct
 import secrets
 import getpass
 import zipfile
-import lzma 
 import shutil
 import logging 
+import tempfile
 from pathlib import Path
 from argparse import ArgumentParser
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -24,8 +24,8 @@ logging.basicConfig(
     datefmt="[%X.%f]",                    
     handlers=[RichHandler(
         console=console, 
-        rich_tracebacks=True,          
-        tracebacks_show_locals=True    
+        rich_tracebacks=True          
+        #tracebacks_show_locals=True    
 )])
 
 logger = logging.getLogger('rich-secure-box')
@@ -97,8 +97,8 @@ class SecureBox:
             ValueError: Raised if the src is not a valid .zip file.
         """
         
-        if not zipfile.is_zipfile(src):
-            raise ValueError(f'The input must be a .zip file')
+        # if not zipfile.is_zipfile(src):
+        #     raise ValueError(f'The input must be a .zip file')
             
         with zipfile.ZipFile(src, mode='r') as zipf:
             zipf.extractall(dest)  
@@ -109,37 +109,18 @@ class SecureBox:
         logger.info(f'[*] Start: Integrity check')
         logger.info(f'[*] Target: {src}')
         
-        dest = src.with_suffix("") 
-        
         try:
-            self.decrypt(src, dest)
-        except InvalidTag as e:
-            logger.error(f'[x] Error while verifying/decrypting: {str(e)}')
-            dest.unlink(missing_ok=True)
-            return
-         
-        if dest.exists():
-            if not zipfile.is_zipfile(dest):
-                raise ValueError(f'[*] Not a .zip file: {dest}')
-            
-            with zipfile.ZipFile(dest, mode='r') as zf:
+            with tempfile.NamedTemporaryFile(suffix='.zip', mode='w+') as f:
+                dest = Path(f.name)
                 
-                #Reading each member to EOF forces zipfile's per-entry CRC-32 check.
-                for info in zf.infolist():
-                    try:
-                        with zf.open(info) as f:    
-                            while f.read(1024 * 4):
-                                pass 
-                        logger.info(f'[+] OK: {info.filename}')
-                        
-                    except (zipfile.BadZipFile, lzma.LZMAError) as e:
-                        logger.error(f'[x] Corrupt: {info.filename}')
-                        return
+                self.decrypt(src, dest)
+                logger.info(f'[*] OK: {src}')
+    
+        except InvalidTag as e:
+            logger.exception(f'[x] Error while verifying/decrypting: {str(e)}')
+            return
             
-            dest.unlink()
-            logger.info(f'[+] Deleted: {dest}')
-            
-            logger.info(f'[*] Complete: Integrity Check')
+        logger.info(f'[*] Complete: Integrity Check')
         
     def generate_key(
         self, 
@@ -281,7 +262,7 @@ class SecureBox:
         logger.info(f'[*] Start: Lock')
         
         src = Path(args.input).resolve() 
-        dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')                
+        dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip.gcm')                
         
         logger.info(f'[+] Target: {src}')
         
@@ -289,21 +270,15 @@ class SecureBox:
         
         #Zip the directory first
         try:
-            self.zip(src, dest)
-            logger.info(f'[+] Zipped: {dest}')
-            
-            if dest.exists():
-                gcm = dest.with_name(f'{dest.name}.gcm')
-                
-                self.encrypt(dest, gcm, password)     
-                logger.info(f'[+] Encrypted: {gcm}')
-                
-                #Drop the transient plaintext archive
-                dest.unlink()
-                logger.info(f'[+] Deleted: {dest}')
+            with tempfile.NamedTemporaryFile(suffix='.zip', mode='w+') as f:
+                zpath = Path(f.name)
+        
+                self.zip(src, zpath)      
+                self.encrypt(zpath, dest, password)     
+                logger.info(f'[+] Locked: {dest}')
             
         except (zipfile.error, TypeError, ValueError) as e:
-            logger.error(f'[x] Zipping/encrypting: {str(e)}')
+            logger.exception(f'[x] Zipping/encrypting: {str(e)}')
             return 
             
         #Delete the input directory after zipping if --delete flag is set
@@ -331,24 +306,22 @@ class SecureBox:
         logger.info(f'[*] Start: Unlock')
         
         src = Path(args.input).resolve()
-        dest = Path(args.output_dir).resolve() / Path(args.name).with_suffix('.zip')
+        dest = Path(args.output_dir).resolve() / Path(args.name)
         
         logger.info(f'[+] Target: {src}')
         
         #Decrypt the .zip.gcm file to .zip
         try:
-            self.decrypt(src, dest)
-            logger.info(f'[+] Decrypted: {dest}')
-            
-            #Extract, then drop the transient plaintext archive.
-            self.unzip(dest, dest.with_suffix(""))  
-            logger.info(f'[+] Unzipped: {dest.with_suffix("")}')   
-            
-            dest.unlink()
-            logger.info(f'[+] Deleted: {dest}')             
+            with tempfile.NamedTemporaryFile(suffix='.zip', mode='w+') as f:
+                zpath = Path(f.name)
+                
+                self.decrypt(src, zpath)
+                self.unzip(zpath, dest) 
+                 
+                logger.info(f'[+] Unlocked: {dest}')            
                 
         except (zipfile.error, InvalidTag, ValueError, InvalidKey) as e:
-            logger.error(f'[x] Error while decrypting: {str(e)}')
+            logger.exception(f'[x] Error while decrypting: {str(e)}')
             return 
             
         #--delete removes this operation's own input: the container here, the source
