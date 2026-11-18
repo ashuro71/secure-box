@@ -71,13 +71,10 @@ uv run main.py unlock --input ./Docs.zip.gcm --output-dir . --name Docs --delete
 uv run main.py verify --input ./Docs.zip.gcm
 ```
 
-Prompts for the password, decrypts the container, and reads every member of the archive to confirm it
-inflates and matches its stored CRC-32. Reports each entry as it passes, and stops at the first
-corrupt one. The container itself is never modified.
+Prompts for the password, decrypts the container, and a successful decryption
+indicates that the container hasn't been tampered with.
 
-Note that this currently decrypts to a `.zip` **beside the container** rather than to a temporary
-location, so the directory holding the container must be writable — and if a member is found corrupt,
-that decrypted archive is left behind — delete it yourself before verifying again.
+Note that this currently decrypts to a temporary '.zip' file, and the container itself is never modified.
 
 ### Arguments
 
@@ -111,22 +108,19 @@ input.
 | 32 | *n* | Associated data (not encrypted, but authenticated) |
 | 32+*n* | rest | Ciphertext + 16-byte GCM tag |
 
-The associated data is an underscore-joined record of the source directory name, the lock timestamp,
-and the four Argon2 parameters — for example `Docs_1794369440_65536_3_4_32`. It is stored in the clear
+The associated data is an underscore-joined record of the version, source directory name, the lock timestamp,
+and the three Argon2 parameters — for example `Docs_1794369440_65536_3_4`. It is stored in the clear
 and covered by the GCM tag, so it cannot be tampered with undetected, but it is metadata, not a
 secret.
 
 Reading a container takes its parameters from this field, not from the program's defaults, which is
 what lets an archive outlive a change to those defaults. Current defaults for new archives are 64 MiB
-memory, 4 passes, 4 lanes, 32-byte key.
+memory, 4 passes, 4 lanes, 32-byte key (cannot be modified).
 
 ## Limitations
 
 Ordered by how much damage they can do to a backup:
 
-- **No format version field.** Nothing identifies which layout a container uses, and the Argon2
-  parameters are read positionally from the end of the metadata, so the format cannot be extended
-  without breaking every archive already written.
 - **Parameters are trusted before they are authenticated.** The key has to be derived before GCM can
   check the tag, so the cost values read out of a container are acted on first and validated never. A
   corrupt length field or mangled digits can make the tool attempt an absurd memory allocation before
@@ -134,9 +128,6 @@ Ordered by how much damage they can do to a backup:
 - **Corruption is all-or-nothing.** GCM authenticates the archive as a single unit, so one flipped bit
   from bit rot or a truncated upload makes the whole backup unrecoverable — there is no partial
   recovery and no built-in redundancy. Verify your copies and keep more than one.
-- **`verify` leaves plaintext behind on a corrupt archive.** It decrypts to a `.zip` beside the
-  container rather than to a temporary directory, and returns without removing that file when it
-  finds a corrupt member. Delete any `.zip` sitting next to a container before verifying it again.
 - **Plaintext touches the disk.** Every command writes an intermediate `.zip` before deleting it, and
   the delete is an ordinary `unlink`, not a secure erase. Note that overwriting is unreliable on SSDs
   and copy-on-write filesystems anyway; full-disk encryption is the real mitigation.
@@ -150,12 +141,9 @@ Ordered by how much damage they can do to a backup:
 
 Decided, not yet implemented, in priority order:
 
-1. **A format version field**, so the layout can evolve without orphaning existing archives. This
-   blocks any legitimate long-term use.
-2. **Bounds-checking the Argon2 parameters** read from a container, refusing anything outside an
+1. **Bounds-checking the Argon2 parameters** read from a container, refusing anything outside an
    accepted range rather than allocating on it.
-3. **`verify` to a temporary location**, leaving no plaintext behind on either success or failure.
 
 ## License
 
-Not yet specified.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
