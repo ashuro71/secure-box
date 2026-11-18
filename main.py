@@ -6,6 +6,7 @@ import getpass
 import zipfile
 import shutil
 import logging 
+import re 
 import tempfile
 from pathlib import Path
 from argparse import ArgumentParser
@@ -36,8 +37,7 @@ class SecureBox:
         self, 
         mem_cost: int = 65536, 
         time_cost: int = 4, 
-        parallelism: int = 4, 
-        key_length: int = 32
+        parallelism: int = 4
     ):
         
         #Argon2id costs used when encrypting. decrypt() overwrites these with the
@@ -45,9 +45,28 @@ class SecureBox:
         self.memory_cost = mem_cost
         self.time_cost = time_cost
         self.parallelism = parallelism
-        self.key_length = key_length 
+        self.key_length = 32
+        self.version = 'v1' 
         
+        self.validate_argon2_costs()
         self.parser = self.create_parser()
+        
+    def validate_argon2_costs(self):
+       if self.time_cost not in range(1,6):
+           raise ValueError(f'[*] Time cost must be between 1 and 5 (inclusive)')
+       
+       if self.memory_cost not in range(16384, 1048577):
+           raise ValueError(f'[*] Memory cost must be 16385 and 1048577 (inclusive)')
+       
+       if self.parallelism not in range(1, 5):
+           raise ValueError(f'[*] Parallelism must be between 1 and 4 (inclusive)') 
+       
+    def validate_assoc_data(self, assoc_data: bytes):
+        decoded = assoc_data.decode()
+        pattern = rf"{self.version}_[a-zA-Z0-9-_]+_\d+_\d+_\d+"     
+        
+        if not re.fullmatch(pattern, decoded):
+            raise ValueError(f'[*] Format of the assoc data is invalid.')
     
     def zip(
         self, 
@@ -166,8 +185,9 @@ class SecureBox:
         
         fname = fpath.stem 
         ctime = int(datetime.now(timezone.utc).timestamp())
+        version = self.version
         
-        components = [fname, ctime, self.memory_cost, self.time_cost, self.parallelism, self.key_length]
+        components = [version, fname, ctime, self.memory_cost, self.time_cost, self.parallelism]
         assoc_data = '_'.join(str(i) for i in components)
         
         return assoc_data.encode()
@@ -205,13 +225,16 @@ class SecureBox:
             assoc_data = data[32:32+ad_len]
             ciphertext = data[32+ad_len:]
             
-        password = getpass.getpass('Password: ').encode()
-        
         #Re-derive using the costs recorded in the container, so archives written under
         #other defaults stay readable.
-        self.memory_cost, self.time_cost, self.parallelism, self.key_length = [int(i) for i in assoc_data.decode().split('_')[-4:]]
-        key = self.generate_key(salt, password)
                 
+        self.validate_assoc_data(assoc_data)
+        self.memory_cost, self.time_cost, self.parallelism = [int(i) for i in assoc_data.decode().split('_')[-3:]]
+        self.validate_argon2_costs()
+            
+        password = getpass.getpass('Password: ').encode()
+        
+        key = self.generate_key(salt, password)        
         aesgcm = AESGCM(key)
         
         plaintext = aesgcm.decrypt(nonce, ciphertext, assoc_data) 
@@ -235,6 +258,8 @@ class SecureBox:
         
         #Generating the assoc data
         assoc_data = self.generate_associated_data(src)
+        self.validate_assoc_data(assoc_data)
+        
         header = struct.pack('<I', len(assoc_data))
         
         with open(src, mode='rb') as f:
