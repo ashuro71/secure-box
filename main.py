@@ -67,7 +67,28 @@ class SecureBox:
         
         if not re.fullmatch(pattern, decoded):
             raise ValueError(f'[*] Format of the assoc data is invalid.')
-    
+        
+    def validate_password_constraints(self, password: str):
+        class InvalidPasswordFormat(Exception):
+            pass 
+        
+        validations = []
+        if not 8 <= len(password) <= 20:
+            validations.append('Length must be between 8 and 20 (inclusive)')
+        if not re.search(r'[a-z]', password):
+            validations.append('Must contain atleast one lowercase character')
+        if not re.search(r'[A-Z]', password):
+            validations.append('Must contain atleast one uppercase character')
+        if not re.search(r'[0-9]', password):
+            validations.append('Must contain atleast one numerical character')
+        if not re.search(r'[!@#$&?]', password):
+            validations.append('Must contain atleast one special character')
+        if re.search(r'\s', password):
+            validations.append('Must not include spaces')
+        
+        if len(validations) > 0:
+            raise InvalidPasswordFormat(validations)
+            
     def zip(
         self, 
         src: Path, 
@@ -291,7 +312,8 @@ class SecureBox:
         
         logger.info(f'[+] Target: {src}')
         
-        password = getpass.getpass('Password: ').encode()
+        password = getpass.getpass('Password: ')
+        self.validate_password_constraints(password)
         
         #Zip the directory first
         try:
@@ -299,7 +321,7 @@ class SecureBox:
                 zpath = Path(f.name)
         
                 self.zip(src, zpath)      
-                self.encrypt(zpath, dest, password)     
+                self.encrypt(zpath, dest, password.encode())     
                 logger.info(f'[+] Locked: {dest}')
             
         except (zipfile.error, TypeError, ValueError) as e:
