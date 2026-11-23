@@ -51,24 +51,54 @@ class SecureBox:
         self.validate_argon2_costs()
         self.parser = self.create_parser()
         
-    def validate_argon2_costs(self):
-       if self.time_cost not in range(1,6):
-           raise ValueError(f'[*] Time cost must be between 1 and 5 (inclusive)')
-       
-       if self.memory_cost not in range(16384, 1048577):
-           raise ValueError(f'[*] Memory cost must be 16385 and 1048577 (inclusive)')
-       
-       if self.parallelism not in range(1, 5):
-           raise ValueError(f'[*] Parallelism must be between 1 and 4 (inclusive)') 
+    def validate_argon2_costs(self) -> None:
+        """
+        Validate that the argon2 costs (time_cost, memory_cost, parallelism)
+        are within certain paramters.
+
+        Raises:
+            ValueError: Raised when time_cost is outside the specified bounds
+            ValueError: Raised when memory_cost is outside the specified bounds
+            ValueError: Raised when parallelism is outside the specified bounds
+        """
+        if self.time_cost not in range(1,6):
+            raise ValueError(f'[*] Time cost must be between 1 and 5 (inclusive)')
+        
+        if self.memory_cost not in range(16384, 1048577):
+            raise ValueError(f'[*] Memory cost must be 16385 and 1048577 (inclusive)')
+        
+        if self.parallelism not in range(1, 5):
+            raise ValueError(f'[*] Parallelism must be between 1 and 4 (inclusive)') 
        
     def validate_assoc_data(self, assoc_data: bytes):
+        """
+        Validates the format of the association data against a specific version.
+
+        Args:
+            assoc_data (bytes): The association data being validated
+
+        Raises:
+            InvalidAssocDataFormat: When the format doesn't match against the specified version
+        """
+        class InvalidAssocDataFormat(Exception):
+            pass 
+        
         decoded = assoc_data.decode()
         pattern = rf"{self.version}_[a-zA-Z0-9-_]+_\d+_\d+_\d+"     
         
         if not re.fullmatch(pattern, decoded):
-            raise ValueError(f'[*] Format of the assoc data is invalid.')
+            raise InvalidAssocDataFormat(f'[*] Format of the assoc data is invalid.')
         
-    def validate_password_constraints(self, password: str):
+    def validate_password_constraints(self, password: str) -> None:
+        """
+        Validates that the password follows certain standards.
+
+        Args:
+            password (str): The password being validated
+
+        Raises:
+            InvalidPasswordFormat: Also lists out the exact validations triggered
+        """
         class InvalidPasswordFormat(Exception):
             pass 
         
@@ -89,11 +119,7 @@ class SecureBox:
         if len(validations) > 0:
             raise InvalidPasswordFormat(validations)
             
-    def zip(
-        self, 
-        src: Path, 
-        dest: Path
-    ) -> Path | None:
+    def zip(self, src: Path, dest: Path) -> Path | None:
         """
         Compress a directory into a .zip file.
 
@@ -144,6 +170,12 @@ class SecureBox:
             zipf.extractall(dest)  
             
     def verify(self, args):
+        """
+        Checks that the container (.zip.gcm) hasn't been corrupted.
+
+        Args:
+            args (input): Argparser args used to get the containter's (.zip.gcm) path
+        """
         src = Path(args.input).resolve()
         
         logger.info(f'[*] Start: Integrity check')
